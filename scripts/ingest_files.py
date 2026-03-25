@@ -3,16 +3,18 @@
 Standalone CLI script for ingesting trade and position files
 without going through the HTTP endpoint.
 
+File type is detected automatically from file *content* – no naming
+convention is required.
+
 Usage
 -----
-    python scripts/ingest_files.py data/samples/trades_format_a.csv
-    python scripts/ingest_files.py data/samples/trades_format_b.json
-    python scripts/ingest_files.py data/samples/positions.csv
-
     # Ingest all sample files at once:
     python scripts/ingest_files.py data/samples/trades_format_1.csv \\
                                    data/samples/trades_format_2.txt \\
-                                   data/samples/positions.csv
+                                   data/samples/positions.yaml
+
+    # Any individual file:
+    python scripts/ingest_files.py <path/to/file>
 
 The script prints a data quality report to stdout for each file.
 """

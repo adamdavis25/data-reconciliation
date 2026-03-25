@@ -335,85 +335,142 @@ class TestIngestTradeFormat2:
 
 
 # ---------------------------------------------------------------------------
-# Position file – CSV
+# Position file – YAML
 # ---------------------------------------------------------------------------
 
 class TestIngestPositions:
 
+    MINIMAL_YAML = """\
+report_date: "2025-01-15"
+positions:
+  - account_id: ACC001
+    holdings:
+      - symbol: AAPL
+        quantity: 100
+        cost_basis_per_share: 185.50
+        closing_price: 185.50
+        currency: USD
+      - symbol: MSFT
+        quantity: 50
+        cost_basis_per_share: 420.25
+        closing_price: 420.25
+        currency: USD
+"""
+
     def test_happy_path(self, db, app):
-        csv = (
-            "account_id,symbol,position_date,quantity,cost_basis_per_share,"
-            "closing_price,currency\n"
-            "ACC001,AAPL,2025-01-15,100,185.50,185.50,USD\n"
-            "ACC001,MSFT,2025-01-15,50,420.25,420.25,USD\n"
-        )
         with app.app_context():
-            report = ingest_positions(csv, "pos.csv")
+            report = ingest_positions(self.MINIMAL_YAML, "pos.yaml")
         assert report.rows_accepted == 2
         assert report.rows_rejected == 0
 
     def test_derived_fields_computed(self, db, app):
-        csv = (
-            "account_id,symbol,position_date,quantity,cost_basis_per_share,"
-            "closing_price,currency\n"
-            "ACC001,NVDA,2025-01-15,80,505.30,505.30,USD\n"
-        )
+        yaml_str = """\
+report_date: "2025-01-15"
+positions:
+  - account_id: ACC001
+    holdings:
+      - symbol: NVDA
+        quantity: 80
+        cost_basis_per_share: 505.30
+        closing_price: 505.30
+        currency: USD
+"""
         with app.app_context():
-            ingest_positions(csv, "pos2.csv")
+            ingest_positions(yaml_str, "pos2.yaml")
             pos = Position.query.filter_by(account_id="ACC001", symbol="NVDA").first()
         assert pos is not None
         assert float(pos.total_cost_basis) == pytest.approx(80 * 505.30)
         assert float(pos.market_value)     == pytest.approx(80 * 505.30)
 
     def test_negative_quantity_rejected(self, db, app):
-        csv = (
-            "account_id,symbol,position_date,quantity,cost_basis_per_share,"
-            "closing_price,currency\n"
-            "ACC001,AAPL,2025-01-15,-10,185.50,185.50,USD\n"
-        )
+        yaml_str = """\
+report_date: "2025-01-15"
+positions:
+  - account_id: ACC001
+    holdings:
+      - symbol: AAPL
+        quantity: -10
+        cost_basis_per_share: 185.50
+        closing_price: 185.50
+        currency: USD
+"""
         with app.app_context():
-            report = ingest_positions(csv, "neg.csv")
+            report = ingest_positions(yaml_str, "neg.yaml")
         assert report.rows_rejected == 1
 
     def test_zero_quantity_accepted(self, db, app):
         """Closed positions (qty=0) are still reported by the broker."""
-        csv = (
-            "account_id,symbol,position_date,quantity,cost_basis_per_share,"
-            "closing_price,currency\n"
-            "ACC003,TSLA,2025-01-15,0,238.45,238.45,USD\n"
-        )
+        yaml_str = """\
+report_date: "2025-01-15"
+positions:
+  - account_id: ACC003
+    holdings:
+      - symbol: TSLA
+        quantity: 0
+        cost_basis_per_share: 238.45
+        closing_price: 238.45
+        currency: USD
+"""
         with app.app_context():
-            report = ingest_positions(csv, "zero.csv")
+            report = ingest_positions(yaml_str, "zero.yaml")
         assert report.rows_accepted == 1
 
     def test_duplicate_position_counted(self, db, app):
-        csv = (
-            "account_id,symbol,position_date,quantity,cost_basis_per_share,"
-            "closing_price,currency\n"
-            "ACC001,AAPL,2025-01-15,100,185.50,185.50,USD\n"
-        )
+        yaml_str = """\
+report_date: "2025-01-15"
+positions:
+  - account_id: ACC001
+    holdings:
+      - symbol: AAPL
+        quantity: 100
+        cost_basis_per_share: 185.50
+        closing_price: 185.50
+        currency: USD
+"""
         with app.app_context():
-            ingest_positions(csv, "dup_pos.csv")
-            report2 = ingest_positions(csv, "dup_pos.csv")
+            ingest_positions(yaml_str, "dup_pos.yaml")
+            report2 = ingest_positions(yaml_str, "dup_pos.yaml")
         assert report2.rows_duplicate == 1
 
-    def test_missing_column_rejected(self, db, app):
-        csv = (
-            "account_id,symbol,position_date,quantity,closing_price,currency\n"
-            "ACC001,AAPL,2025-01-15,100,185.50,USD\n"
-        )
+    def test_missing_required_key_rejected(self, db, app):
+        """Holding missing cost_basis_per_share should be rejected."""
+        yaml_str = """\
+report_date: "2025-01-15"
+positions:
+  - account_id: ACC001
+    holdings:
+      - symbol: AAPL
+        quantity: 100
+        closing_price: 185.50
+        currency: USD
+"""
         with app.app_context():
-            report = ingest_positions(csv, "missing_col.csv")
+            report = ingest_positions(yaml_str, "missing_key.yaml")
+        assert report.rows_rejected == 1
         assert any("cost_basis_per_share" in str(e) for e in report.errors)
 
-    def test_full_sample_file(self, db, app):
-        """All 10 rows of the provided sample should be accepted."""
-        from tests.conftest import POSITIONS_CSV
+    def test_invalid_yaml_rejected(self, db, app):
+        bad = "positions: [\n  unclosed bracket"
         with app.app_context():
-            report = ingest_positions(POSITIONS_CSV, "positions.csv")
+            report = ingest_positions(bad, "bad.yaml")
+        assert any("yaml" in str(e).lower() or "parse" in str(e).lower()
+                   for e in report.errors)
+
+    def test_full_sample_file(self, db, app):
+        """All 10 holdings in the canonical sample should be accepted."""
+        from tests.conftest import POSITIONS_YAML
+        with app.app_context():
+            report = ingest_positions(POSITIONS_YAML, "positions.yaml")
         assert report.rows_total == 10
         assert report.rows_accepted == 10
         assert report.rows_rejected == 0
+
+    def test_bytes_input_works(self, db, app):
+        with app.app_context():
+            report = ingest_positions(
+                self.MINIMAL_YAML.encode("utf-8"), "pos_bytes.yaml"
+            )
+        assert report.rows_accepted == 2
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +485,7 @@ class TestDetectAndIngest:
             "2025-01-15,ACC001,AAPL,100,185.50,BUY,2025-01-17\n"
         )
         with app.app_context():
-            report = detect_and_ingest(csv, "trades.csv")
+            report = detect_and_ingest(csv, "any_name")
         assert report.file_type == "trade_1"
 
     def test_detects_format_2_pipe(self, db, app):
@@ -437,24 +494,49 @@ class TestDetectAndIngest:
             "20250115|ACC001|AAPL|100|18550.00|CUSTODIAN_A\n"
         )
         with app.app_context():
-            report = detect_and_ingest(pipe, "trades.txt")
+            report = detect_and_ingest(pipe, "any_name")
         assert report.file_type == "trade_2"
 
-    def test_detects_position_csv(self, db, app):
-        csv = (
-            "account_id,symbol,position_date,quantity,cost_basis_per_share,"
-            "closing_price,currency\n"
-            "ACC001,AAPL,2025-01-15,100,185.50,185.50,USD\n"
-        )
+    def test_detects_position_yaml(self, db, app):
+        yaml_str = """\
+report_date: "2025-01-15"
+positions:
+  - account_id: ACC001
+    holdings:
+      - symbol: AAPL
+        quantity: 100
+        cost_basis_per_share: 185.50
+        closing_price: 185.50
+        currency: USD
+"""
         with app.app_context():
-            report = detect_and_ingest(csv, "positions.csv")
+            report = detect_and_ingest(yaml_str, "any_name")
         assert report.file_type == "position"
 
-    def test_unrecognised_csv_raises(self, db, app):
-        csv = "foo,bar,baz\n1,2,3\n"
+    def test_filename_ignored_for_format_1(self, db, app):
+        """File name / extension must NOT affect detection."""
+        csv = (
+            "TradeDate,AccountID,Ticker,Quantity,Price,TradeType,SettlementDate\n"
+            "2025-01-15,ACC001,AAPL,100,185.50,BUY,2025-01-17\n"
+        )
+        with app.app_context():
+            # Deliberately misleading extension
+            report = detect_and_ingest(csv, "positions.yaml")
+        assert report.file_type == "trade_1"
+
+    def test_filename_ignored_for_format_2(self, db, app):
+        pipe = (
+            "REPORT_DATE|ACCOUNT_ID|SECURITY_TICKER|SHARES|MARKET_VALUE|SOURCE_SYSTEM\n"
+            "20250115|ACC001|AAPL|100|18550.00|CUSTODIAN_A\n"
+        )
+        with app.app_context():
+            report = detect_and_ingest(pipe, "trades.csv")
+        assert report.file_type == "trade_2"
+
+    def test_unrecognised_content_raises(self, db, app):
         with app.app_context():
             with pytest.raises(ValueError, match="Cannot determine file type"):
-                detect_and_ingest(csv, "unknown.csv")
+                detect_and_ingest("foo,bar,baz\n1,2,3\n", "unknown.csv")
 
     def test_bytes_input_works(self, db, app):
         pipe = (
@@ -462,6 +544,6 @@ class TestDetectAndIngest:
             "20250115|ACC001|AAPL|100|18550.00|CUSTODIAN_A\n"
         ).encode("utf-8")
         with app.app_context():
-            report = detect_and_ingest(pipe, "trades.txt")
+            report = detect_and_ingest(pipe, "any_name")
         assert report.file_type == "trade_2"
         assert report.rows_accepted == 1

@@ -1,0 +1,63 @@
+report_date: "2025-01-15"
+positions:
+  - account_id: ACC001
+    holdings:
+      - symbol: AAPL
+        quantity: 100
+        cost_basis_per_share: 185.50
+        closing_price: 185.50
+        currency: USD
+      - symbol: MSFT
+        quantity: 50
+        cost_basis_per_share: 420.25
+        closing_price: 420.25
+        currency: USD
+      - symbol: GOOGL
+        quantity: 100
+        cost_basis_per_share: 142.80
+        closing_price: 142.80
+        currency: USD
+
+  - account_id: ACC002
+    holdings:
+      - symbol: GOOGL
+        quantity: 75
+        cost_basis_per_share: 142.80
+        closing_price: 142.80
+        currency: USD
+      - symbol: AAPL
+        quantity: 200
+        cost_basis_per_share: 185.50
+        closing_price: 185.50
+        currency: USD
+      - symbol: NVDA
+        quantity: 120
+        cost_basis_per_share: 505.30
+        closing_price: 505.30
+        currency: USD
+
+  - account_id: ACC003
+    holdings:
+      - symbol: TSLA
+        quantity: 0
+        cost_basis_per_share: 238.45
+        closing_price: 238.45
+        currency: USD
+      - symbol: NVDA
+        quantity: 80
+        cost_basis_per_share: 505.30
+        closing_price: 505.30
+        currency: USD
+
+  - account_id: ACC004
+    holdings:
+      - symbol: AAPL
+        quantity: 500
+        cost_basis_per_share: 185.50
+        closing_price: 185.50
+        currency: USD
+      - symbol: MSFT
+        quantity: 300
+        cost_basis_per_share: 420.25
+        closing_price: 420.25
+        currency: USD

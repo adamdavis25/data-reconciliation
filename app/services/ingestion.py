@@ -10,9 +10,13 @@ Supports three file types:
                 MARKET_VALUE, SOURCE_SYSTEM
                 Dates are YYYYMMDD; SELL indicated by negative SHARES/MARKET_VALUE;
                 price is derived as abs(MARKET_VALUE) / abs(SHARES).
-  - position : CSV (comma-delimited) with columns:
-                account_id, symbol, position_date, quantity,
-                cost_basis_per_share, closing_price, currency
+  - position : YAML file with structure:
+                report_date: "YYYY-MM-DD"
+                positions:
+                  - account_id: <str>
+                    holdings:
+                      - symbol, quantity, cost_basis_per_share,
+                        closing_price, currency
 
 Each loader returns a QualityReport that is also persisted to IngestLog.
 """
@@ -27,6 +31,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
+
+import yaml
 
 from sqlalchemy.exc import IntegrityError
 
@@ -453,120 +459,184 @@ def ingest_trades_format_2(file_content: str | bytes, file_name: str) -> Quality
 
 
 # ---------------------------------------------------------------------------
-# Position file – CSV (unchanged format)
+# Position file – YAML
+# ---------------------------------------------------------------------------
+# Expected structure:
+#   report_date: "YYYY-MM-DD"
+#   positions:
+#     - account_id: ACC001
+#       holdings:
+#         - symbol: AAPL
+#           quantity: 100
+#           cost_basis_per_share: 185.50
+#           closing_price: 185.50
+#           currency: USD        # optional, defaults to USD
 # ---------------------------------------------------------------------------
 
-POSITION_REQUIRED_COLS = {
-    "account_id", "symbol", "position_date", "quantity",
-    "cost_basis_per_share", "closing_price", "currency",
+POSITION_HOLDING_REQUIRED_KEYS = {
+    "symbol", "quantity", "cost_basis_per_share", "closing_price",
 }
 
 
 def ingest_positions(file_content: str | bytes, file_name: str) -> QualityReport:
-    """Ingest CSV position file from the bank-broker."""
+    """Ingest YAML position file from the bank-broker."""
     report = QualityReport(file_name=file_name, file_type="position")
 
     if isinstance(file_content, bytes):
         file_content = file_content.decode("utf-8-sig")
 
-    reader = csv.DictReader(io.StringIO(file_content))
-
-    if reader.fieldnames is None:
-        report.add_error(0, "file", "Empty or unparseable CSV")
+    # --- Parse YAML ---
+    try:
+        data = yaml.safe_load(file_content)
+    except yaml.YAMLError as exc:
+        report.add_error(0, "file", f"YAML parse error: {exc}")
         report.persist()
         return report
 
-    actual_cols = {c.strip().lower() for c in reader.fieldnames}
-    missing_cols = {c.lower() for c in POSITION_REQUIRED_COLS} - actual_cols
-    if missing_cols:
-        report.add_error(0, "columns",
-                         f"Missing required columns: {sorted(missing_cols)}")
+    if not isinstance(data, dict):
+        report.add_error(0, "file", "YAML root must be a mapping (dict)")
         report.persist()
         return report
 
-    for row_num, row in enumerate(reader, start=2):
-        report.rows_total += 1
-        errors_before = len(report.errors)
+    # --- report_date (top-level, used as fallback when holding omits it) ---
+    report_date_raw = data.get("report_date")
+    report_date: date | None = None
+    if report_date_raw is not None:
+        report_date = _parse_date_iso(str(report_date_raw))
+        if report_date is None:
+            report.add_error(0, "report_date",
+                             f"Invalid report_date format: '{report_date_raw}'")
 
-        account_id   = str(row.get("account_id", "")).strip()
-        symbol       = str(row.get("symbol", "")).strip().upper()
-        pos_date_str = str(row.get("position_date", "")).strip()
-        qty_raw      = row.get("quantity", "")
-        cb_raw       = row.get("cost_basis_per_share", "")
-        cp_raw       = row.get("closing_price", "")
-        currency     = str(row.get("currency", "USD")).strip().upper()
+    positions_list = data.get("positions")
+    if not isinstance(positions_list, list) or len(positions_list) == 0:
+        report.add_error(0, "positions", "No 'positions' list found in YAML")
+        report.persist()
+        return report
 
-        if not account_id:
-            report.add_error(row_num, "account_id", "Missing account ID")
-        if not symbol:
-            report.add_error(row_num, "symbol", "Missing symbol")
-
-        pos_date = _parse_date_iso(pos_date_str)
-        if pos_date is None:
-            report.add_error(row_num, "position_date",
-                             f"Invalid date format: '{pos_date_str}'")
-        elif pos_date > date.today():
-            report.add_warning(row_num, "position_date",
-                               f"Future position date: {pos_date}")
-
-        quantity = _parse_decimal(qty_raw)
-        if quantity is None:
-            report.add_error(row_num, "quantity",
-                             f"Non-numeric quantity: '{qty_raw}'")
-        elif quantity < 0:
-            report.add_error(row_num, "quantity",
-                             f"Quantity cannot be negative, got {quantity}")
-
-        cost_basis = _parse_decimal(cb_raw)
-        if cost_basis is None:
-            report.add_error(row_num, "cost_basis_per_share",
-                             f"Non-numeric cost basis: '{cb_raw}'")
-        elif cost_basis < 0:
-            report.add_error(row_num, "cost_basis_per_share",
-                             f"Cost basis cannot be negative, got {cost_basis}")
-
-        closing_price = _parse_decimal(cp_raw)
-        if closing_price is None:
-            report.add_error(row_num, "closing_price",
-                             f"Non-numeric closing price: '{cp_raw}'")
-        elif closing_price < 0:
-            report.add_error(row_num, "closing_price",
-                             f"Closing price cannot be negative, got {closing_price}")
-
-        if currency not in VALID_CURRENCIES:
-            report.add_warning(row_num, "currency",
-                               f"Unrecognised currency '{currency}'")
-
-        if len(report.errors) > errors_before:
-            report.rows_rejected += 1
+    # Flatten nested structure: iterate account blocks → holdings
+    row_num = 0
+    for acct_block in positions_list:
+        if not isinstance(acct_block, dict):
+            report.add_error(row_num, "positions",
+                             "Each positions entry must be a mapping")
             continue
 
-        total_cost   = quantity * cost_basis
-        market_value = quantity * closing_price
+        account_id = str(acct_block.get("account_id", "")).strip()
+        if not account_id:
+            report.add_error(row_num, "account_id",
+                             "Missing account_id in positions block")
 
-        position = Position(
-            account_id           = account_id,
-            symbol               = symbol,
-            position_date        = pos_date,
-            quantity             = quantity,
-            cost_basis_per_share = cost_basis,
-            closing_price        = closing_price,
-            currency             = currency,
-            total_cost_basis     = total_cost,
-            market_value         = market_value,
-            source_file          = file_name,
-        )
-        db.session.add(position)
-        try:
-            db.session.flush()
-            report.rows_accepted += 1
-        except IntegrityError:
-            db.session.rollback()
-            report.rows_duplicate += 1
-            report.add_warning(
-                row_num, "position",
-                f"Duplicate position ({account_id}, {symbol}, {pos_date}) – skipped"
+        holdings = acct_block.get("holdings", [])
+        if not isinstance(holdings, list):
+            report.add_error(row_num, "holdings",
+                             f"'holdings' for {account_id} must be a list")
+            continue
+
+        for holding in holdings:
+            row_num += 1
+            report.rows_total += 1
+            errors_before = len(report.errors)
+
+            if not isinstance(holding, dict):
+                report.add_error(row_num, "holding", "Holding must be a mapping")
+                report.rows_rejected += 1
+                continue
+
+            missing_keys = POSITION_HOLDING_REQUIRED_KEYS - {
+                k.lower() for k in holding.keys()
+            }
+            if missing_keys:
+                report.add_error(row_num, "holding",
+                                 f"Missing required keys: {sorted(missing_keys)}")
+                report.rows_rejected += 1
+                continue
+
+            symbol   = str(holding.get("symbol", "")).strip().upper()
+            qty_raw  = holding.get("quantity")
+            cb_raw   = holding.get("cost_basis_per_share")
+            cp_raw   = holding.get("closing_price")
+            currency = str(holding.get("currency", "USD")).strip().upper()
+
+            # Use holding-level date if present, else fall back to report_date
+            holding_date_raw = holding.get("position_date")
+            if holding_date_raw is not None:
+                pos_date = _parse_date_iso(str(holding_date_raw))
+                if pos_date is None:
+                    report.add_error(row_num, "position_date",
+                                     f"Invalid date: '{holding_date_raw}'")
+            else:
+                pos_date = report_date
+
+            if not account_id:
+                report.add_error(row_num, "account_id", "Missing account ID")
+            if not symbol:
+                report.add_error(row_num, "symbol", "Missing symbol")
+
+            if pos_date is None:
+                report.add_error(row_num, "position_date",
+                                 "No position_date provided in holding or report_date")
+            elif pos_date > date.today():
+                report.add_warning(row_num, "position_date",
+                                   f"Future position date: {pos_date}")
+
+            quantity = _parse_decimal(qty_raw)
+            if quantity is None:
+                report.add_error(row_num, "quantity",
+                                 f"Non-numeric quantity: '{qty_raw}'")
+            elif quantity < 0:
+                report.add_error(row_num, "quantity",
+                                 f"Quantity cannot be negative, got {quantity}")
+
+            cost_basis = _parse_decimal(cb_raw)
+            if cost_basis is None:
+                report.add_error(row_num, "cost_basis_per_share",
+                                 f"Non-numeric cost basis: '{cb_raw}'")
+            elif cost_basis < 0:
+                report.add_error(row_num, "cost_basis_per_share",
+                                 f"Cost basis cannot be negative, got {cost_basis}")
+
+            closing_price = _parse_decimal(cp_raw)
+            if closing_price is None:
+                report.add_error(row_num, "closing_price",
+                                 f"Non-numeric closing price: '{cp_raw}'")
+            elif closing_price < 0:
+                report.add_error(row_num, "closing_price",
+                                 f"Closing price cannot be negative, got {closing_price}")
+
+            if currency not in VALID_CURRENCIES:
+                report.add_warning(row_num, "currency",
+                                   f"Unrecognised currency '{currency}'")
+
+            if len(report.errors) > errors_before:
+                report.rows_rejected += 1
+                continue
+
+            total_cost   = quantity * cost_basis
+            market_value = quantity * closing_price
+
+            position = Position(
+                account_id           = account_id,
+                symbol               = symbol,
+                position_date        = pos_date,
+                quantity             = quantity,
+                cost_basis_per_share = cost_basis,
+                closing_price        = closing_price,
+                currency             = currency,
+                total_cost_basis     = total_cost,
+                market_value         = market_value,
+                source_file          = file_name,
             )
+            db.session.add(position)
+            try:
+                db.session.flush()
+                report.rows_accepted += 1
+            except IntegrityError:
+                db.session.rollback()
+                report.rows_duplicate += 1
+                report.add_warning(
+                    row_num, "position",
+                    f"Duplicate position ({account_id}, {symbol}, {pos_date}) – skipped"
+                )
 
     db.session.commit()
     report.persist()
@@ -579,25 +649,48 @@ def ingest_positions(file_content: str | bytes, file_name: str) -> QualityReport
 
 def detect_and_ingest(file_content: str | bytes, file_name: str) -> QualityReport:
     """
-    Auto-detect file type from header content and dispatch to the correct loader.
+    Auto-detect file type from *content* and dispatch to the correct loader.
 
-    Detection rules
-    ---------------
-    1. Inspect the first line of the file.
-    2. Pipe-delimited header containing REPORT_DATE → trade_2
-    3. Comma-delimited header containing TRADEDATE or TRADETYPE → trade_1
-    4. Comma-delimited header containing POSITION_DATE or COST_BASIS → position
-    5. Otherwise raise ValueError.
+    File names and extensions are intentionally ignored — the caller should
+    not need to follow any naming convention.
 
-    Note: file extension is intentionally NOT used as the sole signal because
-    both trade formats are flat text files and the extension may be .csv or .txt.
+    Detection rules (applied in order)
+    ------------------------------------
+    1. If the content parses as YAML and contains a top-level ``positions``
+       key → position file.
+    2. If the first non-empty line is pipe-delimited and contains
+       ``REPORT_DATE`` or ``SECURITY_TICKER`` → trade Format 2.
+    3. If the first non-empty line is comma-delimited and contains
+       ``TRADEDATE`` / ``TRADETYPE`` / ``TICKER`` → trade Format 1.
+    4. Otherwise raise ValueError with a descriptive message.
     """
     if isinstance(file_content, bytes):
-        first_line = file_content.decode("utf-8-sig").split("\n")[0]
+        text = file_content.decode("utf-8-sig")
     else:
-        first_line = file_content.split("\n")[0]
+        text = file_content
 
-    first_line_upper = first_line.strip().upper()
+    # --- Try YAML position file first ---
+    # YAML is structurally distinct from flat delimited text, so we attempt a
+    # lightweight parse.  We only accept it as a position file when the parsed
+    # result is a dict that contains a "positions" key – this avoids
+    # misidentifying a plain CSV as YAML (yaml.safe_load happily parses a
+    # single-column CSV as a list of strings).
+    try:
+        parsed = yaml.safe_load(text)
+        if isinstance(parsed, dict) and "positions" in parsed:
+            return ingest_positions(file_content, file_name)
+    except yaml.YAMLError:
+        pass  # Not valid YAML – fall through to delimited-text detection
+
+    # --- Delimited text detection ---
+    first_line = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            first_line = stripped
+            break
+
+    first_line_upper = first_line.upper()
 
     # Pipe-delimited → Format 2
     if "|" in first_line:
@@ -609,18 +702,14 @@ def detect_and_ingest(file_content: str | bytes, file_name: str) -> QualityRepor
             f"{sorted(cols)}"
         )
 
-    # Comma-delimited
+    # Comma-delimited → Format 1
     cols = {c.strip().upper() for c in first_line_upper.split(",")}
-
-    if "POSITION_DATE" in cols or "COST_BASIS_PER_SHARE" in cols:
-        return ingest_positions(file_content, file_name)
-
     if "TRADEDATE" in cols or "TRADETYPE" in cols or "TICKER" in cols:
         return ingest_trades_format_1(file_content, file_name)
 
     raise ValueError(
-        f"Cannot determine file type for '{file_name}' from header: "
-        f"{sorted(cols)}. "
-        "Expected Format 1 (TradeDate/TradeType/Ticker), "
-        "Format 2 (REPORT_DATE|...) or Position (position_date/cost_basis_per_share)."
+        f"Cannot determine file type for '{file_name}' from content. "
+        "Expected: YAML with 'positions' key (position file), "
+        "pipe-delimited with REPORT_DATE/SECURITY_TICKER (trade Format 2), "
+        "or comma-delimited with TradeDate/TradeType/Ticker (trade Format 1)."
     )

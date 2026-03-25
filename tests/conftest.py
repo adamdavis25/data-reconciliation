@@ -75,18 +75,67 @@ REPORT_DATE|ACCOUNT_ID|SECURITY_TICKER|SHARES|MARKET_VALUE|SOURCE_SYSTEM
 20250115|ACC004|MSFT|300|126075.00|CUSTODIAN_C
 """
 
-POSITIONS_CSV = """\
-account_id,symbol,position_date,quantity,cost_basis_per_share,closing_price,currency
-ACC001,AAPL,2025-01-15,100,185.50,185.50,USD
-ACC001,MSFT,2025-01-15,50,420.25,420.25,USD
-ACC001,GOOGL,2025-01-15,100,142.80,142.80,USD
-ACC002,GOOGL,2025-01-15,75,142.80,142.80,USD
-ACC002,AAPL,2025-01-15,200,185.50,185.50,USD
-ACC002,NVDA,2025-01-15,120,505.30,505.30,USD
-ACC003,TSLA,2025-01-15,0,238.45,238.45,USD
-ACC003,NVDA,2025-01-15,80,505.30,505.30,USD
-ACC004,AAPL,2025-01-15,500,185.50,185.50,USD
-ACC004,MSFT,2025-01-15,300,420.25,420.25,USD
+POSITIONS_YAML = """\
+report_date: "2025-01-15"
+positions:
+  - account_id: ACC001
+    holdings:
+      - symbol: AAPL
+        quantity: 100
+        cost_basis_per_share: 185.50
+        closing_price: 185.50
+        currency: USD
+      - symbol: MSFT
+        quantity: 50
+        cost_basis_per_share: 420.25
+        closing_price: 420.25
+        currency: USD
+      - symbol: GOOGL
+        quantity: 100
+        cost_basis_per_share: 142.80
+        closing_price: 142.80
+        currency: USD
+  - account_id: ACC002
+    holdings:
+      - symbol: GOOGL
+        quantity: 75
+        cost_basis_per_share: 142.80
+        closing_price: 142.80
+        currency: USD
+      - symbol: AAPL
+        quantity: 200
+        cost_basis_per_share: 185.50
+        closing_price: 185.50
+        currency: USD
+      - symbol: NVDA
+        quantity: 120
+        cost_basis_per_share: 505.30
+        closing_price: 505.30
+        currency: USD
+  - account_id: ACC003
+    holdings:
+      - symbol: TSLA
+        quantity: 0
+        cost_basis_per_share: 238.45
+        closing_price: 238.45
+        currency: USD
+      - symbol: NVDA
+        quantity: 80
+        cost_basis_per_share: 505.30
+        closing_price: 505.30
+        currency: USD
+  - account_id: ACC004
+    holdings:
+      - symbol: AAPL
+        quantity: 500
+        cost_basis_per_share: 185.50
+        closing_price: 185.50
+        currency: USD
+      - symbol: MSFT
+        quantity: 300
+        cost_basis_per_share: 420.25
+        closing_price: 420.25
+        currency: USD
 """
 
 
@@ -104,5 +153,5 @@ def seeded_db(db, app):
     with app.app_context():
         ingest_trades_format_1(TRADE_1_CSV, "trades_format_1.csv")
         ingest_trades_format_2(TRADE_2_PIPE, "trades_format_2.txt")
-        ingest_positions(POSITIONS_CSV, "positions.csv")
+        ingest_positions(POSITIONS_YAML, "positions.yaml")
     return db

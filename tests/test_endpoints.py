@@ -29,10 +29,16 @@ class TestIngestEndpoint:
         "20250115|ACC001|AAPL|100|18550.00|CUSTODIAN_A\n"
     )
 
-    POSITIONS_CSV = (
-        "account_id,symbol,position_date,quantity,cost_basis_per_share,"
-        "closing_price,currency\n"
-        "ACC001,AAPL,2025-01-15,100,185.50,185.50,USD\n"
+    POSITIONS_YAML = (
+        'report_date: "2025-01-15"\n'
+        "positions:\n"
+        "  - account_id: ACC001\n"
+        "    holdings:\n"
+        "      - symbol: AAPL\n"
+        "        quantity: 100\n"
+        "        cost_basis_per_share: 185.50\n"
+        "        closing_price: 185.50\n"
+        "        currency: USD\n"
     )
 
     def test_ingest_format_1_returns_200(self, client, db):
@@ -60,17 +66,24 @@ class TestIngestEndpoint:
         assert report["rows_accepted"] == 1
 
     def test_ingest_positions_file(self, client, db):
-        data = {"files": (io.BytesIO(self.POSITIONS_CSV.encode()), "positions.csv")}
+        data = {"files": (io.BytesIO(self.POSITIONS_YAML.encode()), "positions.yaml")}
         resp = client.post("/ingest", data=data, content_type="multipart/form-data")
         body = resp.get_json()
         assert body["ingest_reports"][0]["file_type"] == "position"
         assert body["ingest_reports"][0]["rows_accepted"] == 1
 
+    def test_ingest_positions_file_any_extension(self, client, db):
+        """File extension must not matter – detection is content-based."""
+        data = {"files": (io.BytesIO(self.POSITIONS_YAML.encode()), "daily_report")}
+        resp = client.post("/ingest", data=data, content_type="multipart/form-data")
+        body = resp.get_json()
+        assert body["ingest_reports"][0]["file_type"] == "position"
+
     def test_ingest_multiple_files(self, client, db):
         data = MultiDict([
             ("files", (io.BytesIO(self.TRADE_1_CSV.encode()), "trades_1.csv")),
             ("files", (io.BytesIO(self.TRADE_2_PIPE.encode()), "trades_2.txt")),
-            ("files", (io.BytesIO(self.POSITIONS_CSV.encode()), "positions.csv")),
+            ("files", (io.BytesIO(self.POSITIONS_YAML.encode()), "positions.yaml")),
         ])
         resp = client.post("/ingest", data=data, content_type="multipart/form-data")
         assert resp.status_code == 200
@@ -236,14 +249,24 @@ class TestComplianceEndpoint:
         MSFT = exactly 20 % → must NOT be flagged (strictly > 20 %).
         """
         from app.services.ingestion import ingest_positions
-        csv = (
-            "account_id,symbol,position_date,quantity,cost_basis_per_share,"
-            "closing_price,currency\n"
-            "ACC_TEST,AAPL,2025-06-01,800,100.00,100.00,USD\n"
-            "ACC_TEST,MSFT,2025-06-01,200,100.00,100.00,USD\n"
+        yaml_str = (
+            'report_date: "2025-06-01"\n'
+            "positions:\n"
+            "  - account_id: ACC_TEST\n"
+            "    holdings:\n"
+            "      - symbol: AAPL\n"
+            "        quantity: 800\n"
+            "        cost_basis_per_share: 100.00\n"
+            "        closing_price: 100.00\n"
+            "        currency: USD\n"
+            "      - symbol: MSFT\n"
+            "        quantity: 200\n"
+            "        cost_basis_per_share: 100.00\n"
+            "        closing_price: 100.00\n"
+            "        currency: USD\n"
         )
         with app.app_context():
-            ingest_positions(csv, "breach_test.csv")
+            ingest_positions(yaml_str, "breach_test.yaml")
 
         resp = client.get("/compliance/concentration?date=2025-06-01")
         body = resp.get_json()
@@ -255,16 +278,23 @@ class TestComplianceEndpoint:
     def test_no_breach_when_all_at_or_below_threshold(self, client, app, db):
         """5 equal positions at exactly 20 % each – none should breach."""
         from app.services.ingestion import ingest_positions
-        rows = "\n".join(
-            f"ACC_EQ,{s},2025-07-01,100,10.00,10.00,USD"
+        holdings = "\n".join(
+            f"      - symbol: {s}\n"
+            "        quantity: 100\n"
+            "        cost_basis_per_share: 10.00\n"
+            "        closing_price: 10.00\n"
+            "        currency: USD"
             for s in ["A", "B", "C", "D", "E"]
         )
-        csv = (
-            "account_id,symbol,position_date,quantity,cost_basis_per_share,"
-            "closing_price,currency\n" + rows
+        yaml_str = (
+            'report_date: "2025-07-01"\n'
+            "positions:\n"
+            "  - account_id: ACC_EQ\n"
+            "    holdings:\n"
+            f"{holdings}\n"
         )
         with app.app_context():
-            ingest_positions(csv, "eq_test.csv")
+            ingest_positions(yaml_str, "eq_test.yaml")
 
         resp = client.get("/compliance/concentration?date=2025-07-01")
         assert resp.get_json()["accounts_with_breaches"] == 0
@@ -332,14 +362,20 @@ class TestReconciliationEndpoint:
             "TradeDate,AccountID,Ticker,Quantity,Price,TradeType,SettlementDate\n"
             "2025-08-01,ACC_RECON,AAPL,100,185.50,BUY,2025-08-03\n"
         )
-        pos_csv = (
-            "account_id,symbol,position_date,quantity,cost_basis_per_share,"
-            "closing_price,currency\n"
-            "ACC_RECON,AAPL,2025-08-01,150,185.50,185.50,USD\n"
+        pos_yaml = (
+            'report_date: "2025-08-01"\n'
+            "positions:\n"
+            "  - account_id: ACC_RECON\n"
+            "    holdings:\n"
+            "      - symbol: AAPL\n"
+            "        quantity: 150\n"
+            "        cost_basis_per_share: 185.50\n"
+            "        closing_price: 185.50\n"
+            "        currency: USD\n"
         )
         with app.app_context():
             ingest_trades_format_1(trade_csv, "recon_t.csv")
-            ingest_positions(pos_csv, "recon_p.csv")
+            ingest_positions(pos_yaml, "recon_p.yaml")
 
         resp = client.get("/reconciliation?date=2025-08-01")
         body = resp.get_json()
@@ -383,14 +419,20 @@ class TestReconciliationEndpoint:
             "2025-10-01,ACC_MATCH,AAPL,100,185.50,BUY,2025-10-03\n"
             "2025-10-01,ACC_MATCH,AAPL,30,185.50,SELL,2025-10-03\n"
         )
-        pos_csv = (
-            "account_id,symbol,position_date,quantity,cost_basis_per_share,"
-            "closing_price,currency\n"
-            "ACC_MATCH,AAPL,2025-10-01,70,185.50,185.50,USD\n"
+        pos_yaml = (
+            'report_date: "2025-10-01"\n'
+            "positions:\n"
+            "  - account_id: ACC_MATCH\n"
+            "    holdings:\n"
+            "      - symbol: AAPL\n"
+            "        quantity: 70\n"
+            "        cost_basis_per_share: 185.50\n"
+            "        closing_price: 185.50\n"
+            "        currency: USD\n"
         )
         with app.app_context():
             ingest_trades_format_1(trade_csv, "match_t.csv")
-            ingest_positions(pos_csv, "match_p.csv")
+            ingest_positions(pos_yaml, "match_p.yaml")
 
         resp = client.get("/reconciliation?date=2025-10-01")
         body = resp.get_json()
@@ -404,23 +446,28 @@ class TestReconciliationEndpoint:
 
     def test_format_2_sell_reconciles(self, client, app, db):
         """
-        Format 2: -150 TSLA (SELL) for ACC003.
+        Format 2: intentionally malformed pipe row → rejected.
         Position: 0 TSLA (closed position).
-        Net trade qty = -150; position qty = 0 → delta = +150 (prior-day carry).
         """
         from app.services.ingestion import ingest_trades_format_2, ingest_positions
         pipe = (
             "REPORT_DATE|ACCOUNT_ID|SECURITY_TICKER|SHARES|MARKET_VALUE|SOURCE_SYSTEM\n"
             "20251101|ACC003,TSLA,-150|-35767.50|CUSTODIAN_A\n"
         )
-        pos_csv = (
-            "account_id,symbol,position_date,quantity,cost_basis_per_share,"
-            "closing_price,currency\n"
-            "ACC003,TSLA,2025-11-01,0,238.45,238.45,USD\n"
+        pos_yaml = (
+            'report_date: "2025-11-01"\n'
+            "positions:\n"
+            "  - account_id: ACC003\n"
+            "    holdings:\n"
+            "      - symbol: TSLA\n"
+            "        quantity: 0\n"
+            "        cost_basis_per_share: 238.45\n"
+            "        closing_price: 238.45\n"
+            "        currency: USD\n"
         )
         with app.app_context():
             report = ingest_trades_format_2(pipe, "f2_sell.txt")
-            ingest_positions(pos_csv, "f2_sell_pos.csv")
+            ingest_positions(pos_yaml, "f2_sell_pos.yaml")
 
         assert report.rows_rejected == 1
 
